@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#101827">
+<title>Tilt Maze</title>
+<style>
+  :root { color-scheme: dark; --bg:#101827; --panel:#1b2940; --ink:#edf5ff; --muted:#9eb0c8; --accent:#58e0c1; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; touch-action:none; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 14px env(safe-area-inset-bottom); }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 2px 10px; }
+  h1 { font-size:20px; margin:0; letter-spacing:.04em; }
+  #stats { color:var(--muted); font-size:13px; text-align:right; line-height:1.5; }
+  #stage { position:relative; flex:1; min-height:0; display:grid; place-items:center; }
+  canvas { display:block; max-width:100%; max-height:100%; border-radius:14px; background:#17243a;
+    box-shadow:0 12px 36px #0008; }
+  #panel { position:absolute; inset:0; display:grid; place-items:center; padding:20px; background:#0b1220b8; }
+  .card { width:min(100%,340px); padding:24px 20px; border:1px solid #ffffff20; border-radius:20px;
+    background:var(--panel); text-align:center; box-shadow:0 18px 60px #0009; }
+  .card h2 { margin:0 0 10px; font-size:23px; }
+  .card p { color:var(--muted); line-height:1.5; font-size:14px; margin:0 0 18px; }
+  button { border:0; border-radius:12px; padding:13px 18px; width:100%; background:var(--accent);
+    color:#09221e; font-weight:800; font-size:16px; }
+  button.secondary { margin-top:9px; background:#33445e; color:var(--ink); }
+  #hint { color:var(--muted); text-align:center; font-size:12px; padding:10px 0 12px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>TILT MAZE</h1>
+  <div id="stats">TIME <span id="time">0.0</span>s<br>LEVEL <span id="level">1</span></div>
+</header>
+<main id="stage">
+  <canvas id="game" aria-label="Tilt controlled maze"></canvas>
+  <section id="panel">
+    <div class="card">
+      <h2 id="panelTitle">Ready to roll?</h2>
+      <p id="panelText">Keep your iPhone face-up. Tilt it gently to guide the ball through the maze and reach the glowing exit.</p>
+      <button id="start">Start game</button>
+      <button id="next" class="secondary hidden">Next maze</button>
+    </div>
+  </section>
+</main>
+<div id="hint">Keep the phone flat-ish. Tap Restart if the ball gets stuck.</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const panel = document.getElementById("panel");
+  const panelTitle = document.getElementById("panelTitle");
+  const panelText = document.getElementById("panelText");
+  const startBtn = document.getElementById("start");
+  const nextBtn = document.getElementById("next");
+  const timeEl = document.getElementById("time");
+  const levelEl = document.getElementById("level");
+
+  const COLS = 13, ROWS = 19;
+  let maze = [], tileMap = [], ball = {x:1.5,y:1.5,vx:0,vy:0};
+  let level = 1, running = false, won = false, startedAt = 0, elapsed = 0;
+  let baseBeta = null, baseGamma = null, tiltX = 0, tiltY = 0;
+  let tile = 16, offsetX = 0, offsetY = 0, lastFrame = 0;
+  const radius = 0.23;
+  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+
+  function buildMaze() {
+    maze = Array.from({length:ROWS}, () => Array.from({length:COLS}, () => ({
+      seen:false, walls:[true,true,true,true] // top, right, bottom, left
+    })));
+    const stack = [[0,0]];
+    maze[0][0].seen = true;
+    while (stack.length) {
+      const [x,y] = stack[stack.length-1];
+      const options = [[0,-1,0],[1,0,1],[0,1,2],[-1,0,3]]
+        .filter(([dx,dy]) => maze[y+dy]?.[x+dx] && !maze[y+dy][x+dx].seen);
+      if (!options.length) { stack.pop(); continue; }
+      const [dx,dy,wall] = options[Math.floor(Math.random()*options.length)];
+      const nx=x+dx, ny=y+dy, opposite=(wall+2)%4;
+      maze[y][x].walls[wall]=false;
+      maze[ny][nx].walls[opposite]=false;
+      maze[ny][nx].seen=true;
+      stack.push([nx,ny]);
+    }
+    // Convert cell walls into a solid tile grid: odd coordinates are walkable cells.
+    const w=COLS*2+1, h=ROWS*2+1;
+    tileMap=Array.from({length:h},()=>Array(w).fill(1));
+    for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) {
+      const cx=x*2+1, cy=y*2+1;
+      tileMap[cy][cx]=0;
+      if(!maze[y][x].walls[0]) tileMap[cy-1][cx]=0;
+      if(!maze[y][x].walls[1]) tileMap[cy][cx+1]=0;
+      if(!maze[y][x].walls[2]) tileMap[cy+1][cx]=0;
+      if(!maze[y][x].walls[3]) tileMap[cy][cx-1]=0;
+    }
+    // Open the finish beyond the final cell.
+    tileMap[ROWS*2-1][COLS*2]=0;
+    ball={x:1.5,y:1.5,vx:0,vy:0};
+  }
+
+  function resize() {
+    const stage=document.getElementById("stage");
+    const rect=stage.getBoundingClientRect();
+    const mapW=COLS*2+1, mapH=ROWS*2+1;
+    tile=Math.floor(Math.min((rect.width-8)/mapW,(rect.height-8)/mapH));
+    tile=Math.max(7,tile);
+    const cssW=mapW*tile, cssH=mapH*tile;
+    const dpr=Math.min(window.devicePixelRatio||1,2);
+    canvas.style.width=cssW+"px"; canvas.style.height=cssH+"px";
+    canvas.width=Math.round(cssW*dpr); canvas.height=Math.round(cssH*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    offsetX=0; offsetY=0;
+    draw();
+  }
+
+  function draw() {
+    const w=tileMap[0]?.length||1, h=tileMap.length||1;
+    ctx.clearRect(0,0,w*tile,h*tile);
+    ctx.fillStyle="#17243a"; ctx.fillRect(0,0,w*tile,h*tile);
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++) {
+      if(tileMap[y][x]) {
+        ctx.fillStyle="#50627d";
+        ctx.fillRect(x*tile,y*tile,tile,tile);
+        ctx.fillStyle="#6d809b";
+        ctx.fillRect(x*tile,y*tile,tile,Math.max(1,tile*.09));
+      } else {
+        ctx.fillStyle="#1b2b43";
+        ctx.fillRect(x*tile,y*tile,tile,tile);
+      }
+    }
+    // Exit pad
+    const ex=COLS*2+.5, ey=ROWS*2-1.5;
+    ctx.fillStyle="#58e0c1";
+    ctx.beginPath(); ctx.arc(ex*tile,ey*tile,tile*.34,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle="#baffef"; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(ex*tile,ey*tile,tile*.48,0,Math.PI*2); ctx.stroke();
+    // Ball and soft shadow
+    ctx.fillStyle="#0007"; ctx.beginPath();
+    ctx.arc(ball.x*tile+tile*.07,ball.y*tile+tile*.1,radius*tile,0,Math.PI*2); ctx.fill();
+    const grad=ctx.createRadialGradient((ball.x-.08)*tile,(ball.y-.1)*tile,1,ball.x*tile,ball.y*tile,radius*tile*1.4);
+    grad.addColorStop(0,"#ffffff"); grad.addColorStop(.35,"#9ceaff"); grad.addColorStop(1,"#2184d5");
+    ctx.fillStyle=grad; ctx.beginPath(); ctx.arc(ball.x*tile,ball.y*tile,radius*tile,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle="#d8f7ff"; ctx.lineWidth=1.2; ctx.stroke();
+  }
+
+  function circleHitsWall(x,y) {
+    const minX=Math.floor(x-radius), maxX=Math.floor(x+radius);
+    const minY=Math.floor(y-radius), maxY=Math.floor(y+radius);
+    for(let ty=minY;ty<=maxY;ty++) for(let tx=minX;tx<=maxX;tx++) {
+      if(tileMap[ty]?.[tx]===1 || !tileMap[ty]?.[tx]) {
+        if(tileMap[ty]?.[tx]===1) {
+          const nearX=clamp(x,tx,tx+1), nearY=clamp(y,ty,ty+1);
+          const dx=x-nearX, dy=y-nearY;
+          if(dx*dx+dy*dy < radius*radius) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function moveAxis(axis, amount) {
+    const steps=Math.max(1,Math.ceil(Math.abs(amount)/0.07));
+    const step=amount/steps;
+    for(let i=0;i<steps;i++) {
+      const nx=ball.x+(axis==="x"?step:0);
+      const ny=ball.y+(axis==="y"?step:0);
+      if(!circleHitsWall(nx,ny)) { ball.x=nx; ball.y=ny; }
+      else { if(axis==="x") ball.vx=0; else ball.vy=0; break; }
+    }
+  }
+
+  function tick(now) {
+    if(!running) return;
+    const dt=Math.min((now-lastFrame)/1000,.035);
+    lastFrame=now;
+    // Tilt is filtered slightly to reduce sensor jitter.
+    const accel=0.055, friction=Math.pow(.985,dt*60);
+    ball.vx=(ball.vx+tiltX*accel*dt*60)*friction;
+    ball.vy=(ball.vy+tiltY*accel*dt*60)*friction;
+    const speed=Math.hypot(ball.vx,ball.vy), maxSpeed=.105;
+    if(speed>maxSpeed) { ball.vx=ball.vx/speed*maxSpeed; ball.vy=ball.vy/speed*maxSpeed; }
+    moveAxis("x",ball.vx*dt*60);
+    moveAxis("y",ball.vy*dt*60);
+    elapsed=(now-startedAt)/1000;
+    timeEl.textContent=elapsed.toFixed(1);
+    draw();
+    // Finish zone is the opening at the bottom-right edge.
+    if(ball.x>(COLS*2-.2) && ball.y>(ROWS*2-2.1)) finish();
+    requestAnimationFrame(tick);
+  }
+
+  function onOrientation(e) {
+    if(e.beta==null || e.gamma==null) return;
+    if(baseBeta===null) { baseBeta=e.beta; baseGamma=e.gamma; }
+    const rawX=e.gamma-baseGamma;
+    const rawY=e.beta-baseBeta;
+    tiltX=clamp(rawX/18,-1,1);
+    tiltY=clamp(rawY/18,-1,1);
+  }
+
+  async function enableSensors() {
+    try {
+      if(typeof DeviceOrientationEvent==="undefined") throw new Error("Motion sensors are unavailable in this browser.");
+      if(typeof DeviceOrientationEvent.requestPermission==="function") {
+        const permission=await DeviceOrientationEvent.requestPermission();
+        if(permission!=="granted") throw new Error("Motion permission was not granted.");
+      }
+      window.addEventListener("deviceorientation",onOrientation,true);
+      baseBeta=null; baseGamma=null;
+      return true;
+    } catch(err) {
+      panelTitle.textContent="Motion access needed";
+      panelText.textContent=(err && err.message ? err.message : "Could not access motion sensors.")+" Open this game in Safari, allow Motion & Orientation access, then try again.";
+      return false;
+    }
+  }
+
+  function begin() {
+    buildMaze(); resize();
+    elapsed=0; timeEl.textContent="0.0";
+    ball.vx=ball.vy=0; tiltX=tiltY=0;
+    running=true; won=false;
+    panel.classList.add("hidden");
+    startedAt=performance.now(); lastFrame=startedAt;
+    requestAnimationFrame(tick);
+  }
+
+  function finish() {
+    running=false; won=true;
+    panelTitle.textContent="Maze conquered!";
+    panelText.textContent="You escaped in "+elapsed.toFixed(1)+" seconds. Ready for a new maze?";
+    startBtn.classList.add("hidden"); nextBtn.classList.remove("hidden");
+    panel.classList.remove("hidden");
+  }
+
+  startBtn.addEventListener("click",async()=>{
+    startBtn.disabled=true; startBtn.textContent="Checking sensors…";
+    const ok=await enableSensors();
+    startBtn.disabled=false; startBtn.textContent="Start game";
+    if(ok) begin();
+  });
+  nextBtn.addEventListener("click",()=>{
+    level++; levelEl.textContent=level;
+    nextBtn.classList.add("hidden"); startBtn.classList.remove("hidden");
+    panelTitle.textContent="New maze, new challenge";
+    panelText.textContent="The maze has changed. Keep your iPhone face-up and guide the ball to the glowing exit.";
+    begin();
+  });
+  window.addEventListener("resize",resize);
+  buildMaze(); resize();
+})();
+</script>
+</body>
+</html>
