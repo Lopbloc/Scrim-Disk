@@ -46,12 +46,12 @@ footer button{background:#27323a;color:#e5d3ae;border:1px solid #a9875055;border
       <h2 id="title">The Brassworks</h2>
       <p id="message">Recover both luminous charge cells scattered through the chamber. The extraction ring on the far side will unlock when both are secured. Hold your iPhone face-up and tilt gently to guide your disk.</p>
       <button id="start">INITIALIZE CHAMBER</button>
-      <div class="small">Motion &amp; Orientation access is required.</div>
+      <div class="small">Motion &amp; Orientation access is required. Small tilts for precision, larger tilts for speed.</div>
     </div>
   </section>
 </main>
 <footer>
-  <span id="hint">RECOVER 2 CHARGE CELLS TO UNLOCK THE RING</span>
+  <span id="hint">GENTLE TILT = PRECISION // COUNTER-TILT = BRAKE</span>
   <button id="reset">RESTART</button>
 </footer>
 <script>
@@ -68,7 +68,7 @@ const obstacles=[
 ];
 const pickups=[{x:23,y:34,taken:false},{x:77,y:94,taken:false}];
 const exit={x:50,y:17,r:6.2};
-let disk={x:50,y:132,vx:0,vy:0,r:2.15};
+let disk={x:50,y:132,vx:0,vy:0,r:4.3};
 let scale=1,dpr=1,running=false,complete=false,charge=0;
 let baseBeta=null,baseGamma=null,rawTiltX=0,rawTiltY=0,tiltX=0,tiltY=0,last=0,elapsed=0,started=0;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -197,10 +197,16 @@ function onOrientation(e){
  if(e.beta==null||e.gamma==null)return;
  if(baseBeta===null){baseBeta=e.beta;baseGamma=e.gamma;return}
  let gx=e.gamma-baseGamma,gy=e.beta-baseBeta;
- // Remove a small neutral zone to prevent sensor drift while resting.
- const dead=1.4;gx=Math.abs(gx)<dead?0:Math.sign(gx)*(Math.abs(gx)-dead);
- gy=Math.abs(gy)<dead?0:Math.sign(gy)*(Math.abs(gy)-dead);
- rawTiltX=clamp(gx/20,-1,1);rawTiltY=clamp(gy/20,-1,1);
+ // A small dead zone prevents drift. The remaining angle is mapped smoothly:
+ // gentle tilts remain precise, while larger tilts build acceleration quickly.
+ const dead=0.8, fullTilt=23, curve=1.18;
+ const shape=(angle)=>{
+  const a=Math.abs(angle);
+  if(a<=dead)return 0;
+  const normalized=clamp((a-dead)/(fullTilt-dead),0,1);
+  return Math.sign(angle)*Math.pow(normalized,curve);
+ };
+ rawTiltX=shape(gx);rawTiltY=shape(gy);
 }
 async function requestMotion(){
  try{
@@ -217,10 +223,10 @@ function updateHud(){
  charge=pickups.filter(p=>p.taken).length;
  chargeEl.textContent=charge+" / 2";
  statusEl.textContent=complete?"COMPLETE":charge===2?"UNLOCKED":"LOCKED";
- hintEl.textContent=charge===2?"EXTRACTION RING ACTIVE // REACH THE FAR SIDE":"RECOVER "+(2-charge)+" MORE CHARGE CELL"+(2-charge===1?"":"S");
+ hintEl.textContent=charge===2?"EXTRACTION RING ACTIVE // COUNTER-TILT TO BRAKE":"TILT TO STEER // COUNTER-TILT TO BRAKE // CELLS: "+charge+"/2";
 }
 function resetLevel(){
- disk={x:50,y:132,vx:0,vy:0,r:2.15};pickups.forEach(p=>p.taken=false);
+ disk={x:50,y:132,vx:0,vy:0,r:4.3};pickups.forEach(p=>p.taken=false);
  charge=0;complete=false;elapsed=0;updateHud();draw();
 }
 function startLoop(){
@@ -231,10 +237,15 @@ function frame(now){
  if(!running)return;
  const dt=Math.min((now-last)/1000,.04);last=now;
  tiltX+=(rawTiltX-tiltX)*Math.min(1,dt*9);tiltY+=(rawTiltY-tiltY)*Math.min(1,dt*9);
- const accel=.027,friction=Math.pow(.965,dt*60);
- disk.vx=(disk.vx+tiltX*accel*dt*60)*friction;
- disk.vy=(disk.vy+tiltY*accel*dt*60)*friction;
- const sp=Math.hypot(disk.vx,disk.vy),max=.28;
+ // Heavy-but-responsive movement model.
+ // Acceleration is proportional to tilt, so tiny angles creep and larger
+ // angles build speed. Low passive drag preserves momentum; counter-tilting
+ // applies acceleration in the opposite direction and brakes the disk.
+ const accel=.0044;                 // 14.4 world-units/sec² at full tilt
+ const drag=Math.exp(-.28*dt);      // gentle glide rather than instant stopping
+ disk.vx=(disk.vx+tiltX*accel*dt*3600)*drag;
+ disk.vy=(disk.vy+tiltY*accel*dt*3600)*drag;
+ const sp=Math.hypot(disk.vx,disk.vy),max=.384; // maximum travel speed
  if(sp>max){disk.vx=disk.vx/sp*max;disk.vy=disk.vy/sp*max}
  moveAxis("x",disk.vx*dt*60);moveAxis("y",disk.vy*dt*60);
  pickups.forEach(p=>{if(!p.taken&&dist(disk,p)<4.2){p.taken=true;updateHud()}});
